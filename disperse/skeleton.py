@@ -326,7 +326,7 @@ class Skeleton:
             self.sampling_data['RaDecZCoordinates'] = np.vstack(
                 (ra, dec)).T
         
-    def segments(self, centres, radii, periodic=False):
+    def mask_segments(self, centres, radii, periodic=False):
         """Mask filament segments that lie within exclusion zones.
 
         This is intended to exclude from analysis the part of filaments that
