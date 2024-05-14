@@ -326,11 +326,74 @@ class Skeleton:
             self.sampling_data['RaDecZCoordinates'] = np.vstack(
                 (ra, dec)).T
         
+    def segments(self, centres, radii, periodic=False):
+        """Mask filament segments that lie within exclusion zones.
+
+        This is intended to exclude from analysis the part of filaments that
+        lie within the virial radius of groups or clusters. It can however
+        be used flexibly.
+
+        Parameters
+        ----------
+        centres : array (N, Ndim)
+            The centres of the exclusion spheres. Ndim must be consistent with
+            the number of dimensions of the skeleton.
+        radii : array (N)
+            For each exclusion sphere, the radius within which segments are
+            masked.
+        periodic : bool, optional
+            Apply periodic wrapping in finding the region around each exclusion
+            centre (default: False, no wrapping applied).
+
+        Returns
+        -------
+        None.
+
+        The result is stored in two boolean arrays within `sampling_data`:
+            - 'Mask': for each sampling point, whether it is masked
+            - 'SegmentMask': for each segment, whether it is masked (i.e.
+               whether either of the sampling points at its ends are masked).
+
+        """
+        # Build a tree from exclusion centres (with periodicity if desired)
+        boxsize = self.bbox[0, 1] - self.bbox[0, 0]
+        if periodic:
+            sample_tree = cKDTree(
+                self.sampling_data['CartesianCoordinates'], boxsize=boxsize)
+        else:
+            sample_tree = cKDTree(self.sampling_data['CartesianCoordinates'])
+
+        # Initialize sampling point mask -- all by default unmasked (False)
+        n_samples = self.sampling_data['CartesianCoordinates'].shape[0]
+        self.sampling_data['Mask'] = np.zeros(n_samples, dtype=bool)
+
+        # For each exclusion sphere, find and mark masked sampling points
+        n_spheres = centres.shape[0]
+        for isphere in range(n_spheres):
+            cen = centres[isphere, :]
+            ngbs = sample_tree.query_ball_point(cen, radii[isphere])
+            self.sampling_data['Mask'][ngbs] = True
+
+        # Find masked *segments* -- all those where either start or end point
+        # is masked. In practice, this just means masking all segments with
+        # index 1 below masked segments, as those with a masked start point
+        # are automatically marked as masked already. Two corner cases could
+        # be relevant, but are not in practice:
+        # (1) the 'fake' segment between two filaments -- may be marked as
+        #     masked, but does not matter
+        # (2) the very last segment, which may be marked as masked if the first
+        #     sampling point is masked. Again, this is a fake segment so it
+        #     does not matter.
+        self.sampling_data['SegmentMask'] = np.copy(self.sampling_data['Mask'])
+        ind_masked = np.nonzero(self.sampling_data['Mask'] == True)[0]
+        self.sampling_data['SegmentMask'][ind_masked - 1] = True
+
     def plot_filaments(self, ax, zrange=None, xyz=False, rdz=False,
                        cut_index=2, plot_indices=[0, 1, 2],
                        suppress_wrapping=False, plot_3d=False,
                        critical_points=None, robustness_ratio_threshold=None,
                        filament_indices=None, use_simple=False,
+                       include_masked=False,
                        label_filaments=False, **kwargs):
         """Plot the filament network to a given axis.
 
@@ -423,16 +486,25 @@ class Skeleton:
                 if (np.min(z_samples) > zrange[1] or
                     np.max(z_samples) < zrange[0]):
                     continue
+
+            # Check whether segments of this filament are masked
+            if not include_masked:
+                fil_mask = self.sampling_data['SegmentMask'][offset:end]
+                ind_unmasked = offset + np.nonzero(fil_mask == False)[0]
+                #if np.count_nonzero(fil_mask == True) > 0: set_trace()
+            else:
+                ind_unmasked = np.arange(offset, end)
         
             # If we get here, we will plot the filament, so increase counter
-            current_plotted_filament += 1
+            if len(ind_unmasked) > 0:
+                current_plotted_filament += 1
 
             # Check whether this filament crosses a periodic boundary...
-            xfil = coords[offset:end, plot_indices[0]]
-            yfil = coords[offset:end, plot_indices[1]]
+            xfil = coords[ind_unmasked, plot_indices[0]]
+            yfil = coords[ind_unmasked, plot_indices[1]]
 
             if self.n_dim == 3:
-                zfil = coords[offset:end, cut_index]
+                zfil = coords[ind_unmasked, cut_index]
 
             if suppress_wrapping:
                 if zrange is not None:
@@ -931,7 +1003,7 @@ class Skeleton:
                 dcyl_per_segment.append(dcyl_per_segment_ifil)
             tss.set_time("Append filament-segment data")
 
-            tss.print_time_usage(f'Filament {ifil}')
+            #tss.print_time_usage(f'Filament {ifil}')
 
         # End of loop over filaments
         ts.import_times(tss)
@@ -947,12 +1019,12 @@ class Skeleton:
             return_list.append(dcyl_per_segment)
 
         ts.set_time("Finishing")
-        ts.print_time_usage()
+        #ts.print_time_usage()
             
         return return_list
 
     def simplify_filaments(self, threshold_angle, periodic_wrapping=False,
-        exclude_zero_length=True):
+        exclude_zero_length=True, exclude_masked=True):
         """Simplify the filament network by joining filaments across CPs.
 
         Two filaments can be joined at a critical point (CP) if the angle
@@ -982,6 +1054,7 @@ class Skeleton:
             cp_filaments = self.cp_filaments.data[entries]
             filaments = np.zeros(n_fil, dtype=int) - 1
             reference_points = np.zeros((n_fil, self.n_dim)) - 1
+            use_filaments = np.zeros(n_fil, dtype=bool)
 
             for iientry, ientry in enumerate(cp_filaments):
                 pair, ifil = ientry[0], ientry[1]
@@ -997,9 +1070,16 @@ class Skeleton:
                     self.filament_data['SamplingPointsEnd'][ifil])
                 sample_pos = sampling_coords[sampling_offset : sampling_end, :]
 
+                use_filaments[iientry] = True
                 if icp == cp_start:
                     reference_points[iientry, :] = sample_pos[1, :]
+                    if exclude_masked:
+                        if self.sampling_data['Mask'][sampling_offset] == True:
+                            use_filaments[iientry] = False
                 elif icp == cp_end:
+                    if exclude_masked:
+                        if self.sampling_data['Mask'][sampling_end-1] == True:
+                            use_filaments[iientry] = False
                     reference_points[iientry, :] = sample_pos[-2, :]
                 else:
                     raise ValueError("Critical point is neither start or end?")
@@ -1011,6 +1091,7 @@ class Skeleton:
             max_angle = 0
             current_pair = None
             for iifil in range(n_fil):
+                if exclude_masked and use_filaments[iifil] == False: continue
                 if exclude_zero_length:
                     if self.filament_data['LengthsInMpc'][filaments[iifil]] == 0:
                         continue
@@ -1022,6 +1103,7 @@ class Skeleton:
                     vec_i[ind_high] -= boxsize
                 len_i = np.linalg.norm(vec_i)
                 for jjfil in range(n_fil):
+                    if exclude_masked and use_filaments[jjfil] == False: continue
                     if exclude_zero_length:
                         if self.filament_data['LengthsInMpc'][filaments[iifil]] == 0:
                             continue
@@ -1033,8 +1115,14 @@ class Skeleton:
                         ind_high = np.nonzero(vec_j > boxsize/2)
                         vec_j[ind_high] -= boxsize
                     len_j = np.linalg.norm(vec_j)
-                    angle = np.arccos(
-                        np.dot(vec_i, vec_j) / (len_i * len_j)) * 180 / np.pi
+                    cos_angle = np.dot(vec_i, vec_j) / (len_i * len_j)
+                    if -1.00001 < cos_angle < -1:
+                        cos_angle = -1
+                    if 1 > cos_angle > 1.00001:
+                        cos_angle = 1
+                    if cos_angle < -1 or cos_angle > 1:
+                        print(icp, iifil, jjfil, len_i, len_j, cos_angle)
+                    angle = np.arccos(cos_angle) * 180 / np.pi
                     if angle > max_angle:
                         max_angle = angle
                         pair_fils = np.array([filaments[iifil], filaments[jjfil]])
@@ -1352,7 +1440,7 @@ class Skeleton:
 
         d_cyl = d_cyl[sic_3]
         ts.set_time("Build final member list")
-        ts.print_time_usage("_find_cylinder_members")
+        #ts.print_time_usage("_find_cylinder_members")
             
         return ind_in_cylinder, d_cyl
 
@@ -1424,7 +1512,7 @@ class Skeleton:
 
         
     def find_filament_lengths(self, store_segment_lengths=False,
-        periodic_wrapping=False, use_simple=False):
+        periodic_wrapping=False, use_simple=False, exclude_masked=True):
         """Compute the length of each filament.
 
         This requires that the coordinates have been converted to Cartesian.
@@ -1468,7 +1556,12 @@ class Skeleton:
             else:
                 offset = self.filament_data['SamplingPointsOffset'][ifil]
                 end = self.filament_data['SamplingPointsEnd'][ifil]
-            filament_lengths[ifil] = np.sum(l_seg[offset:end-1])
+            
+            l_seg_filament = l_seg[offset:end-1]            
+            if exclude_masked:
+                mask_bits = self.sampling_data['SegmentMask'][offset:end-1]
+                l_seg_filament = l_seg_filament[mask_bits == False]
+            filament_lengths[ifil] = np.sum(l_seg_filament)
 
             # For completeness, set the length of the last "segment" in each
             # filament to zero: this is the one connecting the last sampling
@@ -1654,7 +1747,7 @@ class FlexArray:
 def numbers_from_string(string):
     #rr = re.findall(
     #    "[-+]?[.]?[\d]+(?:,\d\d\d)*[\.]?\d*(?:[eE][-+]?\d+)?", string)
-    rr = re.findall('[\d]*[.][\d]*[eE][-+][\d]+|[\d]*[.][\d]+|[\d]+', string)
+    rr = re.findall('[\d]*[.][\d]*[eE][-+][\d]+|[\d]*[eE][-+][\d]+|[\d]*[.][\d]+|[\d]+', string)
     numbers = []
     for ir in rr:
         try:
