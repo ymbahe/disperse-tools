@@ -13,6 +13,9 @@ from scipy.spatial import cKDTree
 from disperse.timestamp import TimeStamp
 from pyread_eagle import EagleSnapshot
 
+import pickle
+import traceback
+
 cosmo = FlatLambdaCDM(H0=72, Om0=0.27, Tcmb0=2.725)  # DisPerSE standard
 prop_cycle = plt.rcParams['axes.prop_cycle']
 colors = prop_cycle.by_key()['color']
@@ -27,7 +30,13 @@ class Skeleton:
         skeleton data.
     """
     def __init__(self, filename, verbose=False, sampling_factor=1.0,
-                 periodic_wrapping=False):
+                 shift_coordinates_to_cell_centres=True,
+                 periodic_wrapping=False, raw_file=True):
+
+        if not raw_file:
+            self.load_from_pickle(filename)
+            return
+
         with open(filename, 'r') as f:
 
             # The first line is just the header
@@ -98,6 +107,11 @@ class Skeleton:
                     self.cp_filaments.append(cp_dict['Filaments'][ifil])
 
             self.cp_data['Coordinates'] *= self.sampling_factor
+            if shift_coordinates_to_cell_centres:
+                self.cp_data['Coordinates'] += self.sampling_factor / 2
+            if periodic_wrapping:
+                boxsize = self.bbox[:, 1] - self.bbox[:, 0]
+                self.cp_data['Coordinates'] %= boxsize
 
             # Shrink cp_filaments to the number of actual elements
             self.cp_filaments.shrink()
@@ -150,6 +164,9 @@ class Skeleton:
             # We can now truncate the sampling coordinates to actual size
             self.sampling_data['Coordinates'].shrink()
             self.sampling_data['Coordinates'].data *= self.sampling_factor
+            if shift_coordinates_to_cell_centres:
+                self.sampling_data['Coordinates'].data += (
+                    self.sampling_factor/2)
             self.n_sample = self.sampling_data['Coordinates'].data.shape[0]
 
             # Periodic wrapping of sampling data if needed
@@ -251,7 +268,19 @@ class Skeleton:
             f"{self.n_filaments} filaments."
         )
         return info
-                    
+
+    def save(self, file_name):
+        """Save the class as a pickle file"""
+        file = open(file_name, 'wb')
+        pickle.dump(self.__dict__, file)
+        file.close()
+
+    def load_from_pickle(self, file_name):
+        """Load a previously constructed class from a pickle file."""
+        file = open(file_name, 'rb')
+        self.__dict__ = pickle.load(file)
+        file.close()
+
     def sampling_to_xyz(self, is_cartesian=False):
         """Calculate the sampling point coordinates in Cartesian frame.
 
@@ -326,7 +355,7 @@ class Skeleton:
             self.sampling_data['RaDecZCoordinates'] = np.vstack(
                 (ra, dec)).T
         
-    def mask_segments(self, centres, radii, periodic=False):
+    def mask_segments(self, centres, radii, periodic=False, use_simple=False):
         """Mask filament segments that lie within exclusion zones.
 
         This is intended to exclude from analysis the part of filaments that
@@ -357,22 +386,26 @@ class Skeleton:
         """
         # Build a tree from exclusion centres (with periodicity if desired)
         boxsize = self.bbox[0, 1] - self.bbox[0, 0]
-        if periodic:
-            sample_tree = cKDTree(
-                self.sampling_data['CartesianCoordinates'], boxsize=boxsize)
+        if use_simple:
+            coords = self.sampling_data['SimpleCoordinates']
         else:
-            sample_tree = cKDTree(self.sampling_data['CartesianCoordinates'])
+            coords = self.sampling_data['CartesianCoordinates']
+
+        if periodic:
+            sample_tree = cKDTree(coords, boxsize=boxsize)
+        else:
+            sample_tree = cKDTree(coords)
 
         # Initialize sampling point mask -- all by default unmasked (False)
-        n_samples = self.sampling_data['CartesianCoordinates'].shape[0]
-        self.sampling_data['Mask'] = np.zeros(n_samples, dtype=bool)
+        n_samples = coords.shape[0]
+        sp_mask = np.zeros(n_samples, dtype=bool)
 
         # For each exclusion sphere, find and mark masked sampling points
         n_spheres = centres.shape[0]
         for isphere in range(n_spheres):
             cen = centres[isphere, :]
             ngbs = sample_tree.query_ball_point(cen, radii[isphere])
-            self.sampling_data['Mask'][ngbs] = True
+            sp_mask[ngbs] = True
 
         # Find masked *segments* -- all those where either start or end point
         # is masked. In practice, this just means masking all segments with
@@ -384,9 +417,16 @@ class Skeleton:
         # (2) the very last segment, which may be marked as masked if the first
         #     sampling point is masked. Again, this is a fake segment so it
         #     does not matter.
-        self.sampling_data['SegmentMask'] = np.copy(self.sampling_data['Mask'])
-        ind_masked = np.nonzero(self.sampling_data['Mask'] == True)[0]
-        self.sampling_data['SegmentMask'][ind_masked - 1] = True
+        segment_mask = np.copy(sp_mask)
+        ind_masked = np.nonzero(sp_mask == True)[0]
+        segment_mask[ind_masked - 1] = True
+ 
+        if use_simple:
+            self.sampling_data['SegmentMaskSimple'] = segment_mask
+            self.sampling_data['MaskSimple'] = sp_mask
+        else:
+            self.sampling_data['SegmentMask'] = segment_mask
+            self.sampling_data['Mask'] = sp_mask
 
     def plot_filaments(self, ax, zrange=None, xyz=False, rdz=False,
                        cut_index=2, plot_indices=[0, 1, 2],
@@ -428,8 +468,12 @@ class Skeleton:
             coords = self.sampling_data['RaDecZCoordinates']
         elif use_simple:
             coords = self.sampling_data['SimpleCoordinates']
+            if not include_masked:
+                mask = self.sampling_data['MaskSimple']
         else:
             coords = self.sampling_data['Coordinates'].data
+            if not include_masked:
+                mask = self.sampling_data['Mask']
 
         if use_simple:
             n_filaments = self.n_filaments_simple
@@ -489,7 +533,7 @@ class Skeleton:
 
             # Check whether segments of this filament are masked
             if not include_masked:
-                fil_mask = self.sampling_data['SegmentMask'][offset:end]
+                fil_mask = mask[offset:end]
                 ind_unmasked = offset + np.nonzero(fil_mask == False)[0]
                 #if np.count_nonzero(fil_mask == True) > 0: set_trace()
             else:
@@ -505,6 +549,8 @@ class Skeleton:
 
             if self.n_dim == 3:
                 zfil = coords[ind_unmasked, cut_index]
+
+            if len(xfil) == 0: continue
 
             if suppress_wrapping:
                 if zrange is not None:
@@ -562,7 +608,6 @@ class Skeleton:
                         )
                 if iseg == 0 and label_filaments:
                     index = start_points[iseg]
-                    #print(f"Start {iseg}")
                     ax.annotate(
                         f'{ifil}',
                         xy=(xfil[index], yfil[index]),
