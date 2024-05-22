@@ -46,6 +46,8 @@ class Skeleton:
             self.verbose = verbose
             self.sampling_factor = sampling_factor
 
+            self.filename = filename
+
             # Read number of dimensions
             self.n_dim = int(f.readline())
             if verbose:
