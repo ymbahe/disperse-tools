@@ -1070,6 +1070,37 @@ class Skeleton:
             
         return return_list
 
+    def get_filament_sampling_points(
+        self, ifil, use_simple=False, exclude_masked=True):
+        """Return the indices of the sampling points for one filament.
+
+        This is a simple helper function.
+
+        Returns
+        -------
+        sample_indices : ndarray(int)
+            The indices of the filament sampling points, into
+            `self.sampling_data`.
+        """
+        if use_simple:
+            offset = self.filament_data['SamplingPointsOffsetSimple'][ifil]
+            end = self.filament_data['SamplingPointsEndSimple'][ifil]
+        else:
+            offset = self.filament_data['SamplingPointsOffset'][ifil]
+            end = self.filament_data['SamplingPointsEnd'][ifil]
+
+        indices = np.arange(offset, end)
+
+        if exclude_masked:
+            if use_simple:
+                mask = self.sampling_data['MaskSimple'][indices]
+            else:
+                mask = self.sampling_data['Mask'][indices]
+            ind_good = np.nonzero(mask == False)[0]
+            indices = indices[ind_good]
+
+        return indices
+
     def simplify_filaments(self, threshold_angle, periodic_wrapping=False,
         exclude_zero_length=True, exclude_masked=True):
         """Simplify the filament network by joining filaments across CPs.
@@ -1606,7 +1637,11 @@ class Skeleton:
             
             l_seg_filament = l_seg[offset:end-1]            
             if exclude_masked:
-                mask_bits = self.sampling_data['SegmentMask'][offset:end-1]
+                if use_simple:
+                    mask_bits = (
+                        self.sampling_data['SegmentMaskSimple'][offset:end-1])
+                else:
+                    mask_bits = self.sampling_data['SegmentMask'][offset:end-1]
                 l_seg_filament = l_seg_filament[mask_bits == False]
             filament_lengths[ifil] = np.sum(l_seg_filament)
 
