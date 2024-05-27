@@ -231,29 +231,32 @@ class Skeleton:
                     f"Expected to read '[FILAMENTS DATA]', not '{line}'!")
 
             self.n_sample_extra_fields = int(f.readline())
-            if self.n_sample_extra_fields != 7:
-                raise ValueError(
-                    f"Expected to read 7 extra fields for filaments sampling "
-                    f"points, not {self.n_sample_extra_fields}!"
-                )
-            field_names = [
+            n_xfields = self.n_sample_extra_fields
+
+            xfield_names = [None] * n_xfields
+            xfield_names_options = [
                 'field_value', 'orientation', 'cell', 'log_field_value',
                 'type', 'robustness', 'robustness_ratio'
             ]
-            field_names_internal = [
+            xfield_names_internal = np.array([
                 'FieldValue', 'Orientation', 'Cell', 'LogFieldValue', 'Type',
-                'Robustness', 'RobustnessRatio']
-            for field in field_names:
-                line = f.readline()
-                if line != f'{field}\n':
-                    raise ValueError(
-                        f"Expected field name '{field}', not '{line}'!")
+                'Robustness', 'RobustnessRatio'
+            ])
 
-            # Read sampling point info, line by line...
+            for ii in range(n_xfields):
+                xfield_name = f.readline()[:-1]
+                internal_index = xfield_names_options.index(field_name)
+                if verbose:
+                    print(f"Internal index: {internal_index}")
+                    print(f"Internal name: "
+                          f"{xfield_names_internal[internal_index]}")
+                xfield_names[ii] = xfield_names_internal[internal_index]
+
+            # Read extra sampling point info, line by line...
             self._add_filament_sample_fields()
             for isample in range(self.n_sample):
                 numbers = numbers_from_string(f.readline())
-                for ifield, field in enumerate(field_names_internal):
+                for ifield, field in enumerate(xfield_names):
                     self.sampling_data[field][isample] = numbers[ifield]
 
             # Add info field for sample --> filament
