@@ -1313,6 +1313,7 @@ class Skeleton:
         for ifil in range(self.n_filaments_simple):
             ind_tothis = np.nonzero(new_filament_ids == ifil)[0]
             n_tothis = len(ind_tothis)
+            fil_cps_tothis = fil_cps[ind_tothis, :]
 
             # Find the start and end CPs for the new combined filament.
             # Those are the ones that appear only once in the list of CPs
@@ -1321,8 +1322,13 @@ class Skeleton:
             cps_unique, counts_unique = np.unique(
                 np.ravel(cps), return_counts=True)
             if np.max(counts_unique) > 2:
-                print(f"WARNING!!! New filament {ifil} traverses a CP"
-                      " more than twice!")
+                print(
+                    f"WARNING!!! New filament {ifil} traverses a CP "
+                    f"more than twice (N_max={np.max(counts_unique)} for CP "
+                    f"{cps_unique[np.argmax(counts_unique)]})!\n"
+                    f"This likely indicates the formation of a 'lassoo "
+                    f"filament', but you might want to verify this explicitly."
+                )
             ind_ends = np.nonzero(counts_unique != 2)[0]
             cp_ends = cps_unique[ind_ends]
             if len(ind_ends) != 2:
@@ -1352,6 +1358,7 @@ class Skeleton:
             self.filament_data['SamplingPointsOffsetSimple'][ifil] = (
                 sampling_offset)
 
+            # Loop through all old filaments that make up the current new one
             for ii in range(n_tothis):
                 # Find the CP that is directly connected to the current one
                 xx_pair, xx_ind = np.nonzero(cps == cp)
@@ -1361,20 +1368,21 @@ class Skeleton:
                 # Caveat: apart from the start/end point, each CP appears 2x!
                 # So we have to make sure we are not selecting the filament
                 # going back to where we just came from.
-                #set_trace()
                 ind_next = np.nonzero(cps_other != previous_cp)[0]
                 if len(ind_next) == 0: set_trace()
                 ind_next = ind_next[0]
                 next_cp = cps_other[ind_next]
 
                 # Find the (old) filament connecting these CPs
-                ii_old = np.nonzero(
-                    ((fil_cps[:, 0] == cp) & (fil_cps[:, 1] == next_cp)) |
-                    ((fil_cps[:, 1] == cp) & (fil_cps[:, 0] == next_cp))
+                cps_start_temp = fil_cps_tothis[:, 0]
+                cps_end_temp = fil_cps_tothis[:, 1]
+                ii_old_tothis = np.nonzero(
+                    ((cps_start_temp == cp) & (cps_end_temp == next_cp)) |
+                    ((cps_end_temp == cp) & (cps_start_temp == next_cp))
                 )[0]
-                if len(ii_old) != 1:
+                if len(ii_old_tothis) != 1:
                     raise ValueError("Did not find exact filament match!")
-                ii_old = ii_old[0]
+                ii_old = ind_tothis[ii_old_tothis[0]]
                 old_offset = self.filament_data['SamplingPointsOffset'][ii_old]
                 old_end = self.filament_data['SamplingPointsEnd'][ii_old]
                 curr_samples = old_samples[old_offset : old_end]
