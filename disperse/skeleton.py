@@ -1321,11 +1321,17 @@ class Skeleton:
             cps = self.filament_data['CriticalPoints'][ind_tothis, ...]
             cps_unique, counts_unique = np.unique(
                 np.ravel(cps), return_counts=True)
-            if np.max(counts_unique) > 2:
+            max_passes = np.max(counts_unique)
+            max_cp = cps_unique[np.argmax(counts_unique)]
+            if max_passes > 3:
+                raise ValueError(
+                    f"New filament {ifil} traverses CP {max_cp} {max_passes} "
+                    f"times. This case is not handled, please investigate."
+                )
+            if max_passes > 2:
                 print(
                     f"WARNING!!! New filament {ifil} traverses a CP "
-                    f"more than twice (N_max={np.max(counts_unique)} for CP "
-                    f"{cps_unique[np.argmax(counts_unique)]})!\n"
+                    f"more than twice (N_max={mas_passes} for CP {max_cp})!\n"
                     f"This likely indicates the formation of a 'lassoo "
                     f"filament', but you might want to verify this explicitly."
                 )
@@ -1334,11 +1340,6 @@ class Skeleton:
             if len(ind_ends) != 2:
                 set_trace()
                 raise ValueError("Need exactly two ends of a filament!")
-            #if np.max(counts_unique > 2):
-            #    raise ValueError(
-            #        "A critical point cannot occur more than twice in a "
-            #        "combined filament!"
-            #    )
 
             # Sort the CPs in the right sequence
             previous_cp = -1
