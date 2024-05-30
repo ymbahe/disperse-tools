@@ -1321,8 +1321,9 @@ class Skeleton:
             self.filament_data['SamplingPointsOffsetSimple'][ifil] = (
                 sampling_offset)
 
+            # Find the old filaments belonging to current one, and their CPs
             ind_tothis = np.nonzero(new_filament_ids == ifil)[0]
-            n_tothis = len(ind_tothis)
+            n_old_tothis = len(ind_tothis)
             fil_cps_tothis = fil_cps[ind_tothis, :]
 
             # Find the start and end CPs for the new combined filament.
@@ -1379,16 +1380,24 @@ class Skeleton:
                 cp_ends[1] = cp_ends[0]
                 cp_ends[0] = cp
 
-            # We now know where to start, so start the (ordered) list of CPs
-            # for this new filament
+            # We now know where to start, so initialize an (ordered) list of
+            # CPs for this new filament.
             cp_list = [cp]
 
-            # Loop through all old filaments that make up the current new one
-            for ii in range(n_tothis):
-                # Find the CP that is directly connected to the current one
-                xx_pair, xx_ind = np.nonzero(cps == cp)
-                xx_other = (xx_ind + 1) % 2
-                cps_other = cps[xx_pair, xx_other]
+            # Loop through all old filaments that make up the current new one.
+            # The loop is only for convenience (we know the total number).
+            # The iterator `ii` is not used, since we do not yet know the
+            # order in which to add the old filaments.
+            # As we continue, `cp` always refers to the CP at the current tip
+            # of the new filament.
+            for ii in range(n_old_tothis):
+
+                # Find the CP that is directly connected to the current one.
+                # Recall that `cps` is the list of start [:, 0] and end [:, 1]
+                # CPs for all old filaments in the current new one.
+                old_filament, ind_self = np.nonzero(cps == cp)
+                ind_other = (ind_self + 1) % 2
+                cps_other = cps[old_filament, ind_other]
 
                 # Caveat: apart from the start/end point, each CP appears 2x!
                 # So we have to make sure we are not selecting the filament
