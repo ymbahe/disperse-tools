@@ -1332,13 +1332,13 @@ class Skeleton:
                 print(
                     f"WARNING!!! New filament {ifil} traverses a CP "
                     f"more than twice (N_max={mas_passes} for CP {max_cp})!\n"
-                    f"This likely indicates the formation of a 'lassoo "
+                    f"This likely indicates the formation of a 'lasso "
                     f"filament', but you might want to verify this explicitly."
                 )
                 if np.count_nonzero(counts_unique > 2) > 1:
                     raise ValueError(
                         f"More than one CP is passed >2 times along new "
-                        f"filament {ifil}. This indicates a 'double-lassoo', "
+                        f"filament {ifil}. This indicates a 'double-lasso', "
                         f"which is currently not handled. Please investigate "
                         f"and update the code, if need be."
                     )
@@ -1353,12 +1353,18 @@ class Skeleton:
             previous_cp = -1
             cp = cp_ends[0]
 
-            # Deal with 'lassoo' filaments... Here we want to start at the
+            # Deal with 'lasso' filaments... Here we want to start at the
             # loose end (the CP covered only once) to avoid the possibility of
             # going in the wrong direction at the knot. This is a dirty fix,
             # which will not work if both ends are tied.
-            ind_in_unique = np.nonzero(cps_unique == cp)[0]
-            if counts_unique[ind_in_unique] > 2:
+
+            # Check whether we by chance picked the knot of a lasso as start
+            # (CP occuring > 2 times)
+            ind_endcp_in_unique = np.nonzero(cps_unique == cp)[0]
+            if counts_unique[ind_endcp_in_unique] > 2:
+
+                # Ok, we *did* pick the knot... Just switch the start to the
+                # other end CP (the one currently set to end the filament)
                 cp = cp_ends[1]
                 cp_ends[1] = cp_ends[0]
                 cp_ends[0] = cp
