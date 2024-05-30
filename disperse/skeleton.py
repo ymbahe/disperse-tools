@@ -1368,8 +1368,10 @@ class Skeleton:
                 cp = cp_ends[1]
                 cp_ends[1] = cp_ends[0]
                 cp_ends[0] = cp
-            cp_list = [cp]
 
+            # We now know where to start, so start the (ordered) list of CPs
+            # for this new filament
+            cp_list = [cp]
             self.filament_data['SamplingPointsOffsetSimple'][ifil] = (
                 sampling_offset)
 
