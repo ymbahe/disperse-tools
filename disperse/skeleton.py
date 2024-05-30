@@ -1335,6 +1335,14 @@ class Skeleton:
                     f"This likely indicates the formation of a 'lassoo "
                     f"filament', but you might want to verify this explicitly."
                 )
+                if np.count_nonzero(counts_unique > 2) > 1:
+                    raise ValueError(
+                        f"More than one CP is passed >2 times along new "
+                        f"filament {ifil}. This indicates a 'double-lassoo', "
+                        f"which is currently not handled. Please investigate "
+                        f"and update the code, if need be."
+                    )
+
             ind_ends = np.nonzero(counts_unique != 2)[0]
             cp_ends = cps_unique[ind_ends]
             if len(ind_ends) != 2:
