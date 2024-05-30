@@ -1304,6 +1304,10 @@ class Skeleton:
             self.n_filaments_simple, dtype=int) - 1
         self.filament_data["SamplingPointsEndSimple"] = np.zeros(
             self.n_filaments_simple, dtype=int) - 1
+
+        # We will have a new list of filament sampling points, so we need to
+        # record where in this list each (new) filament starts. Naturally,
+        # the first begins at point 0.
         sampling_offset = 0
 
         # Some data that will be needed later
@@ -1311,6 +1315,12 @@ class Skeleton:
         old_samples = self.sampling_data['Coordinates'].data
 
         for ifil in range(self.n_filaments_simple):
+
+            # Record where in the (new) sampling point list we will start
+            # recording the points for this new filament.
+            self.filament_data['SamplingPointsOffsetSimple'][ifil] = (
+                sampling_offset)
+
             ind_tothis = np.nonzero(new_filament_ids == ifil)[0]
             n_tothis = len(ind_tothis)
             fil_cps_tothis = fil_cps[ind_tothis, :]
@@ -1372,8 +1382,6 @@ class Skeleton:
             # We now know where to start, so start the (ordered) list of CPs
             # for this new filament
             cp_list = [cp]
-            self.filament_data['SamplingPointsOffsetSimple'][ifil] = (
-                sampling_offset)
 
             # Loop through all old filaments that make up the current new one
             for ii in range(n_tothis):
