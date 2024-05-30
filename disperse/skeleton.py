@@ -1109,73 +1109,139 @@ class Skeleton:
         """Simplify the filament network by joining filaments across CPs.
 
         Two filaments can be joined at a critical point (CP) if the angle
-        between them is greater than some threshold (defining two perfectly
-        aligned filaments as at 180 degrees and a perfectly bent filament as
-        0 degrees).
+        between them is greater than `threshold_angle` (where two perfectly
+        aligned filaments are at 180 degrees, and two perfectly reversing
+        filaments at 0 degrees. For CPs with more than two filaments, at most
+        two can be joined (i.e. there can be no "crossings" of simplified
+        filaments), namely the ones with the greatest angle (as long as it is
+        above the threshold).
 
-        Under significant development and may not work as expected.
-        
+        Parameters
+        ----------
+        threshold_angle : float
+            The minimum angle at which two filaments must meet at a critical
+            point in order to be considered for joining. A larger value makes
+            the joining more restrictive.
+        periodic_wrapping : bool, optional
+            Switch to enable periodic wrapping in computing the angles at which
+            filaments meet at a CP (default: False, i.e. no wrapping).
+        exclude_zero_length : bool, optional
+            Switch to prevent the inclusion of filaments with length zero
+            into a chain of connected filaments (default: True). Note that this
+            does not remove the zero-length filaments from the simplified
+            catalogue, they are still there as isolated filaments.
+        exclude_masked : bool, optional
+            Switch to exclude filaments from being joined at a CP near a
+            massive halo (default: True). Using this option requires that
+            the mask has been set up with `self.mask_segments()`.
+
+        Returns
+        -------
+        None
+
+        All output is stored internally. Key attributes are:
+            - `self.simple_filament_ids` --> mapping old to new IDs
+            - `self.sampling_data['SimpleCoordinates'] --> New samplings
+            - `self.sampling_data['SamplingPointsOffsetSimple'], and
+              `self.sampling_data['SamplingPointsEndSimple'] (in analogy to
+              non-simplified equivalents).
+
+        Notes
+        -----
+        Typically, the simplified filaments will be linear structures like
+        the original filaments from DisPerSE. In some cases, however, they
+        can curve back on themselves and end at a point that they have
+        previously traversed (forming a "lasso" shape). This case is handled
+        correctly. More exotic scenarios are the formation of a ring or
+        figure-of-eight. These are detected, though not handled, and a
+        ValueError is raised.
+
         """
-        sampling_coords = self.sampling_data['Coordinates'].data
+        sample_coords = self.sampling_data['Coordinates'].data
         boxsize = self.bbox[0, 1] - self.bbox[0, 0]
 
-        # Initialise a list of new (simplified) filament IDs. Initially,
-        # this is just identical to the old IDs.
-        new_filament_ids = np.arange(self.n_filaments, dtype=int)
+        # ======== Step 1: find pairs of filaments to join ==============
+
+        # Initialize a list of filament pairs with a common start/end
+        # critical point (CP) to be joined.
         filament_pairs = []
 
         # Go through critical points and identify joinable filaments...
         for icp in range(self.n_cp):
-            n_fil = self.cp_data['NumberOfFilaments'][icp]
-            if n_fil < 2: continue
 
+            # Find the number of filaments ending at this CP.
+            # If there are fewer than two, we can skip it -- nothing to join.
+            n_fil_cp = self.cp_data['NumberOfFilaments'][icp]
+            if n_fil_cp < 2: continue
+
+            # Extract the CP's coordinates, and the indices of its filaments
             pos_cp = self.cp_data['Coordinates'][icp, :]
-            entries = np.arange(self.cp_data['CPFilamentsOffset'][icp],
-                                self.cp_data['CPFilamentsEnd'][icp])
-            cp_filaments = self.cp_filaments.data[entries]
-            filaments = np.zeros(n_fil, dtype=int) - 1
-            reference_points = np.zeros((n_fil, self.n_dim)) - 1
-            use_filaments = np.zeros(n_fil, dtype=bool)
+            listind_filaments_icp = np.arange(
+                self.cp_data['CPFilamentsOffset'][icp],
+                self.cp_data['CPFilamentsEnd'][icp]
+            )
+            cp_filament_data = self.cp_filaments.data[listind_filaments_icp]
+            cp_filaments = cp_filament_data[:, 1]
 
-            for iientry, ientry in enumerate(cp_filaments):
-                pair, ifil = ientry[0], ientry[1]
-                filaments[iientry] = ifil
+            # Set up lists of the reference points for each filament, and
+            # whether to use it or not.
+            reference_points = np.zeros((n_fil_cp, self.n_dim)) - 1
+            use_filaments = np.zeros(n_fil_cp, dtype=bool) + True
 
-                # Need to find the "reference point" for this filament.
-                # Currently, this is its sampling point one away from the CP.
-                cp_start = self.filament_data['CriticalPoints'][ifil, 0]
-                cp_end = self.filament_data['CriticalPoints'][ifil, 1]
+            # Need to find the "reference point" for each filament in turn.
+            # This is its sampling point one away from the CP.
+            for iifil, ifil in enumerate(cp_filaments):
+
+                # Get sample coordinates of current filament
                 sampling_offset = (
                     self.filament_data['SamplingPointsOffset'][ifil])
                 sampling_end = (
                     self.filament_data['SamplingPointsEnd'][ifil])
-                sample_pos = sampling_coords[sampling_offset : sampling_end, :]
+                sample_pos = sample_coords[sampling_offset : sampling_end, :]
 
-                use_filaments[iientry] = True
-                if icp == cp_start:
-                    reference_points[iientry, :] = sample_pos[1, :]
+                # Need to find out whether the current CP is the start or end
+                # point of this filament, and pick the appropriate sample.
+                # In either case, we flag a filament as 'do not use' if its
+                # sample point corresponding to the CP is flagged as masked.
+                fil_cp_start = self.filament_data['CriticalPoints'][ifil, 0]
+                fil_cp_end = self.filament_data['CriticalPoints'][ifil, 1]
+                if icp == fil_cp_start:
+                    reference_points[iifil, :] = sample_pos[1, :]
                     if exclude_masked:
                         if self.sampling_data['Mask'][sampling_offset] == True:
-                            use_filaments[iientry] = False
-                elif icp == cp_end:
+                            use_filaments[iifil] = False
+                elif icp == fil_cp_end:
+                    reference_points[iifil, :] = sample_pos[-2, :]
                     if exclude_masked:
                         if self.sampling_data['Mask'][sampling_end-1] == True:
-                            use_filaments[iientry] = False
-                    reference_points[iientry, :] = sample_pos[-2, :]
+                            use_filaments[iifil] = False
                 else:
-                    raise ValueError("Critical point is neither start or end?")
+                    raise ValueError(
+                        f"Critical point {icp} is neither at the start nor at "
+                        f"the end of filament {ifil}!"
+                    )
 
-            # We now have all the filaments that come to this CP and their 
-            # coordinates. Find at most one pair that is continuing across it,
-            # based on the pair with the largest angle between them
-            # (if it is above he threshold)
+            # We now have all the filaments that come to this CP, and the
+            # coordinates of the next sample away from the CP. Find at most one
+            # pair that is continuing across it, based on the pair with the
+            # largest angle between them (if it is above he threshold).
+
+            # Initialise the match, with worst possible angle (0) and 'no pair'.
             max_angle = 0
             current_pair = None
-            for iifil in range(n_fil):
+
+            # We need to check each filament against each other, so use a
+            # double loop (i = outer, j = inner)
+            for iifil in range(n_fil_cp):
+
+                # Exclude this filament if it is masked or has length 0
+                # (unless disabled)
                 if exclude_masked and use_filaments[iifil] == False: continue
                 if exclude_zero_length:
-                    if self.filament_data['LengthsInMpc'][filaments[iifil]] == 0:
-                        continue
+                    if self.filament_data['LengthsInMpc'][cp_filaments[iifil]]\
+                        == 0: continue
+
+                # Calculate the vector of this filament's first segment
                 vec_i = reference_points[iifil, :] - pos_cp
                 if periodic_wrapping:
                     ind_low = np.nonzero(vec_i < -boxsize/2)
@@ -1183,12 +1249,20 @@ class Skeleton:
                     ind_high = np.nonzero(vec_i > boxsize/2)
                     vec_i[ind_high] -= boxsize
                 len_i = np.linalg.norm(vec_i)
-                for jjfil in range(n_fil):
-                    if exclude_masked and use_filaments[jjfil] == False: continue
+
+                # Now the inner loop -- check each (connected) filament as a
+                # possible match for the i-filament from the outer loop
+                for jjfil in range(n_fil_cp):
+
+                    # Same exclusion criteria as above, and not the i-filament
+                    if (exclude_masked and
+                        use_filaments[jjfil] == False): continue
                     if exclude_zero_length:
-                        if self.filament_data['LengthsInMpc'][filaments[iifil]] == 0:
-                            continue
+                        if self.filament_data['LengthsInMpc']\
+                            [cp_filaments[iifil]] == 0: continue
                     if jjfil == iifil: continue
+
+                    # Calculate the vector of this filament's first segment
                     vec_j = reference_points[jjfil, :] - pos_cp
                     if periodic_wrapping:
                         ind_low = np.nonzero(vec_j < -boxsize/2)
@@ -1196,114 +1270,127 @@ class Skeleton:
                         ind_high = np.nonzero(vec_j > boxsize/2)
                         vec_j[ind_high] -= boxsize
                     len_j = np.linalg.norm(vec_j)
+
+                    # Compute the angle between the two vectors. Due to
+                    # rounding, the cosine can come out very slightly outside
+                    # the allowed [-1, 1] range, so we deal with these cases
+                    # explicitly. Any larger deviation is a sign of trouble.
                     cos_angle = np.dot(vec_i, vec_j) / (len_i * len_j)
                     if -1.00001 < cos_angle < -1:
                         cos_angle = -1
                     if 1 > cos_angle > 1.00001:
                         cos_angle = 1
                     if cos_angle < -1 or cos_angle > 1:
-                        print(icp, iifil, jjfil, len_i, len_j, cos_angle)
+                        raise ValueError(
+                            f"Illegal cosine value {cos_angle} between "
+                            f"filaments {iifil} (l = {len_i:.2e}) and {jjfil} "
+                            f"(l = {len_j:.2e}) at CP {icp}!"
+                        )
                     angle = np.arccos(cos_angle) * 180 / np.pi
+
+                    # Check if this pair is the new best match and save it as
+                    # the current pair if so (with the lower index first)
                     if angle > max_angle:
                         max_angle = angle
-                        pair_fils = np.array([filaments[iifil], filaments[jjfil]])
+                        pair_fils = [cp_filaments[iifil], cp_filaments[jjfil]]
                         current_pair = (np.min(pair_fils), np.max(pair_fils))
 
-            # Record the best join if its angle is appropriate
+            # Done looping through this CP's filaments.
+            # Record the best filament pair if its angle is appropriate.
             if max_angle > threshold_angle:
                 filament_pairs.append(current_pair)
-                #if new_filament_ids[current_pair[1]] == current_pair[1]:
-                #    new_filament_ids[current_pair[1]] = current_pair[0]
-                #elif new_filament_ids[current_pair[0]] == current_pair[0]:
-                #    new_filament_ids[current_pair[0]] = current_pair[1]
-                #else:
-                #    raise ValueError("Both filament pairs already reassigned!")
 
-        # We now have a translation list of old --> new filament IDs, but this
-        # is not yet self-consistent -- there may be "chain-renamings" if,
-        # e.g., 0<-->1 and 1<-->2. At the moment, filament 2 is still listed
-        # as relabled to 1, when in reality it should also be 0. 
+        # ====== Step 2: convert pairs into old --> new filament mapping =====
 
+        # Initialise a list of new (simplified) filament IDs. Initially,
+        # these are identical to the old IDs, so y = x.
+        new_filament_ids = np.arange(self.n_filaments, dtype=int)
+
+        # `filament_pairs` is an Nx2 array that lists all pairs of filaments
+        # to be combined. From this, we now extract each disjoint chain of
+        # linked filaments and reassign each filament in that chain the same
+        # new ID (the one of the first filament in the chain). To do that,
+        # we search for 'singles', filaments that only appear once in the whole
+        # pairs list, because these must be at the end of their chain.
+
+        # Find out how often each filament appears in the pairs list
         filament_pairs = np.array(filament_pairs)
         p_unique, p_count = np.unique(
             np.ravel(filament_pairs), return_counts=True)
         filament_pair_counts = np.zeros(self.n_filaments, dtype=int)
         filament_pair_counts[p_unique] = p_count
+
+        # Identify single filaments, which must be the start/end of a chain
         p_singles = p_unique[np.nonzero(p_count == 1)[0]]
+
+        # Flag to record whether each filament has already been processed
         flag = np.zeros(self.n_filaments, dtype=bool)
 
+        # Now go through all singles and build their chain
         for ising in p_singles:
-            # Has this filament already been reassigned? Then no need to
-            # look at it again.
+
+            # Has this filament already been reassigned (as last filament of an
+            # earlier assembled chain)? Then we can skip it.
             if new_filament_ids[ising] != ising:
                 continue
-            curr_filament = ising
-            # Walk across linked filaments. Max counter of 1000 here in case
+
+            # Walk along the current chain. Max counter of 1000 here is in case
             # of unexpected infinite-loop problems.
+            current_filament = ising
             for iii in range(1000):
-                # Mark current filament as attached to current string
-                new_filament_ids[curr_filament] = ising
-                flag[curr_filament] = True
+
+                # Mark current filament as attached to the current chain
+                new_filament_ids[current_filament] = ising
+                flag[current_filament] = True
 
                 # Have we arrived at another single filament? Then the current
                 # "chain" is finished. Otherwise, we keep travelling (but we
                 # need to explicitly exclude the first iteration, when we are
                 # still at the starting filament).
-                if filament_pair_counts[curr_filament] == 1 and iii > 0:
-                    break 
+                if filament_pair_counts[current_filament] == 1 and iii > 0:
+                    break
 
                 # If we get here, there is another filament that this one
                 # links to. Find it and then jump to it.
-                ind = np.nonzero(filament_pairs == curr_filament)
-                entries = ind[0]
-                pairs = filament_pairs[entries, (ind[1] + 1) % 2]
-                ind_pair = np.nonzero(flag[pairs] == False)[0]
-
-                if len(ind_pair) > 1:
+                ind_data = np.nonzero(filament_pairs == current_filament)
+                ind_in_pairs, loc_in_pairs = ind_data[0], (ind_data[1] + 1) % 2
+                next_candidates = filament_pairs[ind_in_pairs, loc_in_pairs]
+                subind_next = np.nonzero(flag[next_candidates] == False)[0]
+                if len(subind_next) > 1:
                     raise ValueError("A filament cannot pair with > 1!")
-                if len(ind_pair) == 0:
-                    set_trace()
+                if len(subind_next) == 0:
                     raise ValueError(
                         "How can we land at a totally un-connected filament?")                    
+                current_filament = next_candidates[subind_next[0]]
 
-                curr_filament = pairs[ind_pair[0]]
+        # ---- Almost done with the mapping, just make the new IDs dense ----
 
+        # We do the transformation in one line with np.unique(). The main
+        # output (`unique_ids`) are the "surviving" old IDs -- either filaments
+        # that were not joined with anything, or the singles that started
+        # each chain. But we are mainly interested in the inverse
+        # (`new_filament_ids`), since this tells us for each entry in the
+        # original (uncompacted) list, i.e. for each old filament, where its
+        # updated ID lies in the unique list -- its new compact ID.
+        unique_ids, new_filament_ids = np.unique(
+            new_filament_ids, return_inverse=True)
 
-        # The bit below turned out not to work reliably...
-        """        
-        iiter = 0
-        while(True):
-            iiter += 1
-            new_ids_b = new_filament_ids[new_filament_ids]
-            diff = np.sum(np.abs(new_ids_b - new_filament_ids))
-            new_filament_ids = new_ids_b
-
-            # Can stop if there has been no change -- then we are converged
-            if diff == 0: break
-
-            # Emergency break if we are in an infinite loop...
-            if iiter == 1000:
-                raise ValueError(
-                    f"Filament renaming did not converge after {ii} "
-                    f"iterations! Please investigate."
-                )
-        """
-
-
-        # Make the new filament IDs dense. `unique_ids` gives the old 
-        # (surviving) filament IDs for each new one. 
-        unique_ids, new_filament_ids = np.unique(new_filament_ids, return_inverse=True)
+        # Store the old --> new filament mapping, and the number of new ones
+        self.simple_filament_ids = new_filament_ids
         self.n_filaments_simple = len(unique_ids)
 
-        # Need to create the new list of sampling points. In principle we
-        # should also update the CP->filament links, but let's leave that
-        # for now...
+        # Initialize the new sampling point lists: coordinates (for all new
+        # filaments together), and per-filament offset and and into that list.
+        # In principle we should also update the CP->filament links, but let's
+        # leave that for now...
         self.sampling_data["SimpleCoordinates"] = np.zeros(
             (self.n_sample, self.n_dim)) - 1
         self.filament_data["SamplingPointsOffsetSimple"] = np.zeros(
             self.n_filaments_simple, dtype=int) - 1
         self.filament_data["SamplingPointsEndSimple"] = np.zeros(
             self.n_filaments_simple, dtype=int) - 1
+
+        # ======= Step 3: Assemble the new sample point sequences =========
 
         # We will have a new list of filament sampling points, so we need to
         # record where in this list each (new) filament starts. Naturally,
@@ -1314,6 +1401,7 @@ class Skeleton:
         fil_cps = self.filament_data['CriticalPoints']
         old_samples = self.sampling_data['Coordinates'].data
 
+        # The rest of the work is done separately for each new filament
         for ifil in range(self.n_filaments_simple):
 
             # Record where in the (new) sampling point list we will start
@@ -1342,7 +1430,7 @@ class Skeleton:
             if max_passes > 2:
                 print(
                     f"WARNING!!! New filament {ifil} traverses a CP "
-                    f"more than twice (N_max={mas_passes} for CP {max_cp})!\n"
+                    f"more than twice (N_max={max_passes} for CP {max_cp})!\n"
                     f"This likely indicates the formation of a 'lasso "
                     f"filament', but you might want to verify this explicitly."
                 )
@@ -1360,9 +1448,10 @@ class Skeleton:
                 set_trace()
                 raise ValueError("Need exactly two ends of a filament!")
 
-            # Sort the CPs in the right sequence
-            previous_cp = -1
+            # Initialise current and CP, for moving along the new filament.
+            # (for previous, use dummy -1 since there is none).
             cp = cp_ends[0]
+            previous_cp = -1
 
             # Deal with 'lasso' filaments... Here we want to start at the
             # loose end (the CP covered only once) to avoid the possibility of
@@ -1397,71 +1486,91 @@ class Skeleton:
                 # CPs for all old filaments in the current new one.
                 old_filament, ind_self = np.nonzero(cps == cp)
                 ind_other = (ind_self + 1) % 2
-                cps_other = cps[old_filament, ind_other]
+                linked_cps = cps[old_filament, ind_other]
 
                 # Caveat: apart from the start/end point, each CP appears 2x!
                 # So we have to make sure we are not selecting the filament
                 # going back to where we just came from.
-                ind_next = np.nonzero(cps_other != previous_cp)[0]
-                if len(ind_next) == 0: set_trace()
-                ind_next = ind_next[0]
-                next_cp = cps_other[ind_next]
+                ind_next = np.nonzero(linked_cps != previous_cp)[0]
+                if len(ind_next) == 0:
+                    raise ValueError(
+                        f"Could not find a valid next CP while building "
+                        f"filament {ifil}, in step {ii} of {n_old_tothis}."
+                    )
+                next_cp = linked_cps[ind_next[0]]   # [0] to have a scalar
 
-                # Find the (old) filament connecting these CPs
-                cps_start_temp = fil_cps_tothis[:, 0]
-                cps_end_temp = fil_cps_tothis[:, 1]
+                # Find the (old) filament connecting the current and next CP.
+                # Need to check for both 'correct' and 'reverse' order in list.
+                # We only consider old filaments that make up the new one, so
+                # this will give a unique match even if there are other
+                # (old) filaments linking the same two CPs.
                 ii_old_tothis = np.nonzero(
-                    ((cps_start_temp == cp) & (cps_end_temp == next_cp)) |
-                    ((cps_end_temp == cp) & (cps_start_temp == next_cp))
+                    ((fil_cps_tothis[:, 0] == cp) &
+                     (fil_cps_tothis[:, 1] == next_cp))
+                    |
+                    ((fil_cps_tothis[:, 1] == cp) &
+                     (fil_cps_tothis[:, 0] == next_cp))
                 )[0]
                 if len(ii_old_tothis) != 1:
                     raise ValueError("Did not find exact filament match!")
                 ii_old = ind_tothis[ii_old_tothis[0]]
-                old_offset = self.filament_data['SamplingPointsOffset'][ii_old]
-                old_end = self.filament_data['SamplingPointsEnd'][ii_old]
-                curr_samples = old_samples[old_offset : old_end]
-                #set_trace()
 
-                # We may be traversing this filament in reverse order. If so,
-                # invert it to have a continuous line of sampling points.
-                if fil_cps[ii_old, 1] == cp:
+                # Extract the sampling points of the current old filament.
+                # We do not exclude masked segments here, to allow selecting
+                # masked/unmasked segments as needed for the new filament.
+                curr_samples = self.get_filament_sampling_points(ii_old,
+                    use_simple=False, exclude_masked=False)
+
+                # We may be traversing this filament in reverse order (second
+                # case in the test within `fil_cps_tothis` above). If so,
+                # invert sampling points to have a continuous line.
+                if fil_cps_tothis[ii_old_tothis, 1] == cp:
                     curr_samples = np.flip(curr_samples, axis=0)
 
                 # Unless we are at the first (old) filament for this new one,
                 # we don't need the first sampling point (the start CP), as
                 # it's already there from the previous (old) filament.
                 if ii > 0:
-                    curr_samples = curr_samples[1:, ...]
+                    curr_samples = curr_samples[1:]
 
                 # Now we can finally add the samples to the list!
-                end = sampling_offset + curr_samples.shape[0]
-                self.sampling_data['SimpleCoordinates'][sampling_offset:end, ...] = (
-                    curr_samples)
-                sampling_offset = end
+                sampling_end = sampling_offset + len(curr_samples)
+                curr_sample_pos = (
+                    self.sampling_data['Coordinates'].data[curr_samples, :])
+                self.sampling_data['SimpleCoordinates']\
+                    [sampling_offset:sampling_end, ...] = curr_sample_pos
 
                 # Update indices for next iteration
+                sampling_offset = sampling_end
                 previous_cp = cp
                 cp = next_cp
                 cp_list.append(cp)
 
+            # Done with the loop over old filaments.
             # Safety check: we should now have arrived at the other CP end!
             if cp != cp_ends[1]:
                 raise ValueError(
                     f"Should have arrived at CP {cp_ends[1]}, "
                     f"but got to {cp} instead! Please investigate."
                 )
+
+            # We already recorded the sampling offset for this new filament
+            # at the beginning, now we can also record the end point.
             self.filament_data['SamplingPointsEndSimple'][ifil] = (
                 sampling_offset)
-        self.simple_filament_ids = new_filament_ids
+
+        # ====== Ends loop over new filaments. Update bookkeeping. =========
 
         # Although the new filaments cover all the old ones, there are fewer
-        # sampling points because joint CPs are only retained once. So we need
-        # to update the total number of sampling points too.
+        # sampling points because joint CPs are only retained once. So we can
+        # truncate the list of new sampling coordinates, and need to update
+        # the total number of sampling points too.
         self.n_sample_simple = sampling_offset
         self.sampling_data['SimpleCoordinates'] = (
             self.sampling_data['SimpleCoordinates'][:sampling_offset, ...])
 
-        # Add info field for sample --> filament
+        # Add an explicit mapping from (simple) sampling points to (simple)
+        # filaments, for convenience.
         self.sampling_data['FilamentSimple'] = np.zeros(
             self.n_sample_simple, dtype=int) - 1
         for ifil in range(self.n_filaments_simple):
