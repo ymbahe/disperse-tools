@@ -1363,6 +1363,10 @@ class Skeleton:
                         "How can we land at a totally un-connected filament?")                    
                 current_filament = next_candidates[subind_next[0]]
 
+                if iii == 999:
+                    raise ValueError(
+                        f"Filament chain walk did not converge for {ising}!")
+
         # ---- Almost done with the mapping, just make the new IDs dense ----
 
         # We do the transformation in one line with np.unique(). The main
