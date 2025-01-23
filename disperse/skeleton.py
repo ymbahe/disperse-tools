@@ -661,7 +661,6 @@ class Skeleton:
             p1, p2, coords, distance, use_tree=False)
         return ind_cyl, d_cyl    
         
-
     def find_points_near_filaments(
         self, coords, distance, periodic=False, ind_filaments=None,
         use_simple=False, with_sample_spheres=True, verbose=False,
@@ -725,12 +724,8 @@ class Skeleton:
             points that are not near a filament.
         ind_fil : ndarray(int)
             Index of the closest filament to each point
-        num_match : ndarray(int)
-            Number of filaments to which each point was matched. **Currently
-            not well implemented, e.g. it counts the caps and cylinders
-            independently!**
-
         """
+
         # Initial setup
         ts = TimeStamp()
         n_points = coords.shape[0]
@@ -748,6 +743,8 @@ class Skeleton:
             offsets = self.filament_data['SamplingPointsOffsetSimple']
             ends = self.filament_data['SamplingPointsEndSimple']
             sample_filament = self.sampling_data['FilamentSimple']
+            sample_mask = self.sampling_data['MaskSimple']
+            segment_mask = self.sampling_data['SegmentMaskSimple']
         else:
             n_filaments = self.n_filaments
             n_samples = self.n_sample
@@ -755,25 +752,26 @@ class Skeleton:
             offsets = self.filament_data['SamplingPointsOffset']
             ends = self.filament_data['SamplingPointsEnd']
             sample_filament = self.sampling_data['Filament']
+            sample_mask = self.sampling_data['Mask']
+            segment_mask = self.sampling_data['SegmentMask']
         ts.set_time("Load filament data")
                     
         # To enable searching around sampling points, we need to find those
         # belonging to selected filaments (if only processing a subset).
         # For consistency, we also create a full list of sample points to be
         # used if analysing the full filament network.
-        if ind_filaments is not None:
-            mask_sample = np.zeros(n_samples, dtype=bool)
-            for ifil in ind_filaments:
-                mask_sample[offsets[ifil] : ends[ifil]] = True
-            ind_sample = np.nonzero(mask_sample)[0]
-        else:
+        if ind_filaments is None:
             ind_sample = np.arange(n_samples)
+        else:
+            include_sample = np.zeros(n_samples, dtype=bool)
+            for ifil in ind_filaments:
+                include_sample[offsets[ifil] : ends[ifil]] = True
+            ind_sample = np.nonzero(include_sample)[0]
+            
+        # ... and exclude masked sampling points, if desired
         if exclude_masked:
-            if use_simple:
-                ind_sample = np.nonzero(
-                    self.sampling_data['MaskSimple'] == False)[0]
-            else:
-                ind_sample = np.nonzero(self.sampling_data['Mask'] == False)[0]
+            subind_sample = np.nonzero(~sample_mask[ind_sample])[0]
+            ind_sample = ind_sample[subind_sample]
 
         n_sample = len(ind_sample)
         ts.set_time("Make sample point list")
@@ -796,11 +794,11 @@ class Skeleton:
                 print(f"...done ({ts.get_time():.2f} sec.)", flush=True)
 
         # Set up arrays recording whether a point is near a filament, and 
-        # what the minimum filament distance is
+        # what the minimum filament distance is. Recall, n_points is the total
+        # number of points to search for.
         flag = np.zeros(n_points, dtype=bool)
         min_dist = np.zeros(n_points) + 1000.0
         ind_fil = np.zeros(n_points, dtype=int) - 1
-        num_match = np.zeros(n_points, dtype=int)
 
         # If we want to collect neighbours broken down by individual filaments
         # and/or segments, set up the (initially empty) lists to hold these too
@@ -830,14 +828,23 @@ class Skeleton:
                 
             # Find all neighbours around all sampling points. Note, this
             # builds a list-of-lists and may get inefficient for very large
-            # numbers of sampling points.
-            ngb_lol = tree_samples.query_ball_tree(tree_points, distance)
+            # numbers of sampling points. Note that `distance` here must be
+            # a scalar (for now)!
+            #if ~np.isscalar(distance):
+            #    raise ValueError("Distance must be a scalar!")
+            #ngbs_lol = tree_samples.query_ball_tree(tree_points, distance)
 
             # Process each sampling point separately to mark its neighbours
             for iisample, isample in enumerate(ind_sample):
-                ngbs = np.array(ngb_lol[iisample])
+                if np.isscalar(distance):
+                    distance_thisfil = distance
+                else:
+                    distance_thisfil = distance[sample_filament[isample]]
+                ngbs = tree_points.query_ball_point(
+                    sample_coords[isample, :], distance_thisfil)
                 if len(ngbs) == 0:
                     continue
+                ngbs = np.array(ngbs)
 
                 # Mark all neighbours of the point as "near the network"
                 flag[ngbs] = True
@@ -845,9 +852,10 @@ class Skeleton:
                 # Update the allocation of closest filament for those
                 # neighbours that are closer to the current sampling point than
                 # any previous ones
-                dist_ngbs = np.linalg.norm(
-                    coords[ngbs, :] - sample_coords[isample, :], axis=1)
-                subind_best = np.nonzero(dist_ngbs < min_dist[ngbs])
+                dp = coords[ngbs, :] - sample_coords[isample, :]
+                dp = (dp + boxsize/2) % boxsize - boxsize/2
+                dist_ngbs = np.linalg.norm(dp, axis=1)
+                subind_best = np.nonzero(dist_ngbs < min_dist[ngbs])[0]
                 ind_best = ngbs[subind_best]
                 min_dist[ind_best] = dist_ngbs[subind_best]
                 ind_fil[ind_best] = sample_filament[isample]
@@ -875,7 +883,7 @@ class Skeleton:
             # just for this filament
             if individual_filaments:
                 flag_filament = np.zeros(n_points, dtype=bool)
-                dcyl_filament = np.zeros(n_points) + 1000
+                dcyl_filament = np.zeros(n_points) + np.inf
 
             # If we want to record membership broken down by segment, we need
             # to set up a second layer of containers for all the segments in
@@ -885,8 +893,11 @@ class Skeleton:
             if individual_segments:
                 ngbs_per_segment_ifil = []
                 dcyl_per_segment_ifil = []
+                
+                # Recyclable master list to record whether and how far away
+                # each point is within one individual segment
                 flag_segment = np.zeros(n_points, dtype=bool)
-                dcyl_segment = np.zeros(n_points) + 1000
+                dcyl_segment = np.zeros(n_points) + np.inf
                 
             tss.set_time(f'Setup filament')
 
@@ -894,15 +905,16 @@ class Skeleton:
             # its start sampling point as a label. That is why we subtract
             # 1 from `SamplingPointsEnd`, to not include the unphysical
             # "bridge" to the subsequent filament.
-
             for iseg in range(offsets[ifil], ends[ifil] - 1):
                 if exclude_masked:
-                    if use_simple:
-                        if self.sampling_data['SegmentMaskSimple'][iseg]:
-                            continue
-                    else:
-                        if self.sampling_data['SegmentMask'][iseg]:
-                            continue
+                    if segment_mask[iseg]:
+                        # Can skip, BUT: if we are keeping track of individual
+                        # segments, need to append an empty array so that the
+                        # numbering is kept intact!
+                        if individual_segments:
+                            ngbs_per_segment_ifil.append(np.zeros(0, dtype=int))
+                            dcyl_per_segment_ifil.append(np.zeros(0))
+                        continue
 
                 tsss = TimeStamp()
                 p1 = sample_coords[iseg, :]
@@ -910,110 +922,48 @@ class Skeleton:
                 dp = p2 - p1
                 tsss.set_time('Setup')
  
+                # If there is periodic wrapping, we *only* (!!!) need to find
+                # the one (1! ONE!) mirror point of p2 that gives a good
+                # pairing with p1. Because we use a tree with periodic
+                # wrapping support to pre-select neighbour points, this 
+                # captures all neighbours on the other side of the boundary
+                # as well. Also much simpler than segment-sector splitting... 
                 if periodic:
-                    # With periodic boundaries, each segment can be broken
-                    # into multiple sectors. Use master lists to collect
-                    # membership and distance across those, even though there
-                    # should not be any overlap in practice...
-                    if individual_segments:
-                        flag_segment[:] = False
-                        dcyl_segment[:] = 1000
-                    tsss.set_time("Initialize segment list")
+                    p2 = self._find_correct_mirror_point(p1, p2)
+
+                # One single cylinder member finding in all cases.
+                # Recall that `coords` are the points to search against, and
+                # `distance_thisfil` is the search radius for this filament.
+                ngbs_segment, dcyl_segment = self._find_cylinder_members(
+                    p1, p2, coords, distance_thisfil,
+                    ifil=ifil, tree_points=tree_points,
+                    flag=flag, min_dist=min_dist, ind_fil=ind_fil
+                )
+                tsss.set_time("Find cylinder members")
                         
-                    # Alright. Need to check for each dimension whether the
-                    # segment crosses one or more periodic boundaries.
-                    # Depending on how often this happens, we end up with 1-8
-                    # sectors created from the current point pair.
-                    # Initialise two lists to hold all these pairings
-                    a_list = [p1]
-                    b_list = [p2]
-                    for idim in range(self.n_dim):
-                        if np.abs(dp[idim]) > boxsize / 2:
-                            a_list, b_list = self._split_points(
-                                idim, boxsize, a_list=a_list, b_list=b_list)
-                    tsss.set_time("Splitting")    
-                    
-                    # We now have the full list of pairings that need to be
-                    # tested for cylinder membership.
-                    tsss.add_counters(
-                        ["Find cylinder members", "Record filament ngbs",
-                         "Record segment ngbs"]
-                    )
-                    for ia, ib in zip(a_list, b_list):
-                        tsss.start_time()
-                        ind_cyl, d_cyl = self._find_cylinder_members(
-                            ia, ib, coords, distance_thisfil, ifil=ifil,
-                            tree_points=tree_points,
-                            flag=flag, min_dist=min_dist, ind_fil=ind_fil)
-                        num_match[ind_cyl] += 1
-                        tsss.increase_time("Find cylinder members")
-                        
-                        if individual_filaments:
-                            flag_filament[ind_cyl] = True
+                # Update per-filament records, if desired
+                if individual_filaments:
+                    flag_filament[ngbs_segment] = True
 
-                            # Update the closest cylindrical radius within
-                            # the current filament
-                            subind_best = np.nonzero(
-                                d_cyl < dcyl_filament[ind_cyl])[0]
-                            dcyl_filament[ind_cyl[subind_best]] = (
-                                d_cyl[subind_best])
-                        tsss.increase_time("Record filament ngbs")
+                    # Update closest cylindrical radius within the
+                    # current filament
+                    subind_best = np.nonzero(
+                        dcyl_segment < dcyl_filament[ngbs_segment])[0]
+                    dcyl_filament[ngbs_segment[subind_best]] = (
+                        dcyl_segment[subind_best])
+                    tsss.set_time("Record filament ngbs")
 
-                        if individual_segments:
-                            flag_segment[ind_cyl] = True
-
-                            # Update closest cylindrical radius within
-                            # current segment (non-trivial in case of
-                            # splitting due to periodic wrapping)
-                            subind_best = np.nonzero(
-                                d_cyl < dcyl_segment[ind_cyl])[0]
-                            dcyl_segment[ind_cyl[subind_best]] = (
-                                d_cyl[subind_best])
-                        tsss.increase_time("Record segment ngbs")
-
-                else:
-                    # Without periodic wrapping, things are easy.
-                    ngbs_segment, dcyl_segment = self._find_cylinder_members(
-                        p1, p2, coords, distance_thisfil, ifil=ifil,
-                        tree_points=tree_points,
-                        flag=flag, min_dist=min_dist, ind_fil=ind_fil
-                    )
-                    tsss.set_time("Find cylinder members")
-                    num_match[ngbs_segment] += 1
-
-                    if individual_filaments:
-                        flag_filament[ngbs_segment] = True
-
-                        # Update closest cylindrical radius within the
-                        # current filament
-                        subind_best = np.nonzero(
-                            dcyl_segment < dcyl_filament[ngbs_segment])[0]
-                        dcyl_filament[ngbs_segment[subind_best]] = (
-                            dcyl_segment[subind_best])
-                        tsss.set_time("Record filament ngbs")
-
-                        # We do not need to update the distance for individual
-                        # segments, because without periodic wrapping there
-                        # is only one sector per segment.
-                        
-                # Ends periodic/non-periodic distinction; we have all
-                # neighbours and their distances for the current segment.
-                # Gather them if we are interested in them.
                 if individual_segments:
-
-                    # Need to still extract actual neighbours for periodic
-                    if periodic:
-                        ngbs_segment = np.nonzero(flag_segment)[0]
-
+                    # No need to check against previous entries here, each
+                    # segment is visited only once. Just append results.
                     ngbs_per_segment_ifil.append(ngbs_segment)
-                    dcyl_per_segment_ifil.append(dcyl_segment[ngbs_segment])
+                    dcyl_per_segment_ifil.append(dcyl_segment)
                     tsss.set_time("Append segment data")
                     
                 #tsss.print_time_usage(f'Segment {iseg}')
                 tss.import_times(tsss)
                 
-            # Back at per-filament level -- gather info if required
-
+            # Back at per-filament level -- gather detailed info if required
             tss.set_time('Segment loop')
             if individual_filaments:
                 ngbs_filament = np.nonzero(flag_filament)[0]
@@ -1021,19 +971,22 @@ class Skeleton:
                 ngbs_per_filament.append(ngbs_filament)
                 dcyl_per_filament.append(dcyl_filament)
             tss.set_time("Append filament data")
+
+            # For per-segment info, we want a list-of-lists grouped by
+            # filaments, so append the sublist for the current filament.
             if individual_segments:
                 ngbs_per_segment.append(ngbs_per_segment_ifil)
                 dcyl_per_segment.append(dcyl_per_segment_ifil)
             tss.set_time("Append filament-segment data")
-
             #tss.print_time_usage(f'Filament {ifil}')
 
         # End of loop over filaments
         ts.import_times(tss)
 
+        # Find all skeleton neighbours -- anything that got flagged
         ind_ngb = np.nonzero(flag)[0]
 
-        return_list = [ind_ngb, min_dist, ind_fil, num_match]
+        return_list = [ind_ngb, min_dist, ind_fil]
         if individual_filaments:
             return_list.append(ngbs_per_filament)
             return_list.append(dcyl_per_filament)
@@ -1078,7 +1031,7 @@ class Skeleton:
         return indices
 
     def simplify_filaments(self, threshold_angle, periodic_wrapping=False,
-        exclude_zero_length=True, exclude_masked=True):
+        exclude_zero_length=True, exclude_masked=True, record_angles=False):
         """Simplify the filament network by joining filaments across CPs.
 
         Two filaments can be joined at a critical point (CP) if the angle
@@ -1139,6 +1092,9 @@ class Skeleton:
         # critical point (CP) to be joined.
         filament_pairs = []
 
+        if record_angles:
+            cp_angles = []
+
         # Go through critical points and identify joinable filaments...
         for icp in range(self.n_cp):
 
@@ -1189,6 +1145,7 @@ class Skeleton:
                         if self.sampling_data['Mask'][sampling_end-1] == True:
                             use_filaments[iifil] = False
                 else:
+                    set_trace()
                     raise ValueError(
                         f"Critical point {icp} is neither at the start nor at "
                         f"the end of filament {ifil}!"
@@ -1232,7 +1189,7 @@ class Skeleton:
                         use_filaments[jjfil] == False): continue
                     if exclude_zero_length:
                         if self.filament_data['LengthsInMpc']\
-                            [cp_filaments[iifil]] == 0: continue
+                            [cp_filaments[jjfil]] == 0: continue
                     if jjfil == iifil: continue
 
                     # Calculate the vector of this filament's first segment
@@ -1270,6 +1227,8 @@ class Skeleton:
 
             # Done looping through this CP's filaments.
             # Record the best filament pair if its angle is appropriate.
+            if record_angles:
+                cp_angles.append(max_angle)
             if max_angle > threshold_angle:
                 filament_pairs.append(current_pair)
 
@@ -1404,10 +1363,12 @@ class Skeleton:
             max_passes = np.max(counts_unique)
             max_cp = cps_unique[np.argmax(counts_unique)]
             if max_passes > 3:
-                raise ValueError(
-                    f"New filament {ifil} traverses CP {max_cp} {max_passes} "
-                    f"times. This case is not handled, please investigate."
-                )
+                pass
+                
+                #raise ValueError(
+                #    f"New filament {ifil} traverses CP {max_cp} {max_passes} "
+                #     f"times. This case is not handled, please investigate."
+                #)
             if max_passes > 2:
                 print(
                     f"WARNING!!! New filament {ifil} traverses a CP "
@@ -1423,7 +1384,7 @@ class Skeleton:
                     )
                     #set_trace()
 
-            ind_ends = np.nonzero(counts_unique != 2)[0]
+            ind_ends = np.nonzero((counts_unique != 2) & (counts_unique != 4))[0]
             cp_ends = cps_unique[ind_ends]
 
             # Deal with ring filaments that have no ends at all
@@ -1495,6 +1456,7 @@ class Skeleton:
                     # "Easy". Exclude the previous CP (if > 1), and then find
                     # the filament that gets to the remaining one
                     ind_next = np.nonzero(linked_cps != previous_cp)[0]
+                    loop_flag = False
                     if len(ind_next) == 2 and ii == 0 and len(ind_ends) == 0:
                         next_cp = linked_cps[0]
                         print(
@@ -1504,7 +1466,13 @@ class Skeleton:
                         )
                     elif len(ind_next) == 1:
                         next_cp = linked_cps[ind_next[0]]  # [0] --> scalar 
+                    elif (len(ind_next) == 0 and len(linked_cps == 2) and
+                          np.count_nonzero(linked_cps == previous_cp) == 2):
+                        next_cp = linked_cps[0]
+                        loop_flag = True
+
                     else:
+                        set_trace()
                         raise ValueError(
                             f"Found {len(ind_next)} next CPs for CP {cp}, "
                             f"on position {ii} of new filament {ifil}, "
@@ -1538,6 +1506,12 @@ class Skeleton:
                             f"likely indicates a 2-filament-loop, but you "
                             f"should verify it."
                         )
+                    elif n_match_curr == 2 and ii > 0 and loop_flag:
+                        subind = np.nonzero(
+                            ind_tothis[ii_old_tothis] != prev_filament[1])[0]
+                        if len(subind) != 1: raise ValueError
+                        ii_old_tothis = ii_old_tothis[subind]
+
                     elif n_match_curr != 1:
                         raise ValueError(
                             f"ERROR!! {n_match_curr} filaments between CPs "
@@ -1760,8 +1734,42 @@ class Skeleton:
             end = self.filament_data['SamplingPointsEndSimple'][ifil]
             self.sampling_data['FilamentSimple'][off:end] = ifil
 
+        if record_angles:
+            return np.array(cp_angles)
+
+    def _find_correct_mirror_point(self, a, b, boxsize=None):
+        """Find the mirror point of b to use as pair with a.
+
+        This is the (unique) mirror point of b that is less than half a boxsize
+        away from a in any axis. Note that it may lie outside of the 
+        coordinate range [0, boxsize], unless no wrapping is needed.
+
+        Parameters
+        ----------
+        a : ndarray(ndims)
+            Reference point from which we want to get a good offset
+        b : ndarray(ndims)
+            Test point whose correct mirror image we want to find.
+        boxsize : float, optional
+            The periodic box size. If None (default), it is calculated from
+            the internally stored bounding box.
+        """
+        if boxsize is None:
+            boxsize = self.bbox[0, 1] - self.bbox[0, 0]
+        d = b - a
+        ind_flip_up = np.nonzero(d < -boxsize/2)
+        ind_flip_down = np.nonzero(d > boxsize/2)
+        b_mirror = np.copy(b)
+        b_mirror[ind_flip_up] += boxsize
+        b_mirror[ind_flip_down] -= boxsize
+
+        return b_mirror
+
+
     def _split_points(self, idim, boxsize, a_list, b_list):
         """Split a given list of A/B points along a periodic boundary.
+
+        This function is now *OBSOLETE* for neighbour finding.
 
         This is necessary to include all mirror pairings between two points
         for filament neighbour extraction. The input lists `a_list` and
@@ -1773,34 +1781,36 @@ class Skeleton:
 
         ts = TimeStamp()
         
-        # Step 1: define the offsets for A and B...
+        # Step 1: define the offsets for A and B: by how much their mirror
+        # points must be shifted. The points have not been mirrored in the
+        # current dimension yet, so are all at the same value as the original
+        # point (= only need to check that). The offset for B must be opposite
+        # that for A.
         a_orig = a_list[-1]
         b_orig = b_list[0]
-        offset_a = np.zeros(self.n_dim)
-        offset_b = np.zeros(self.n_dim)
         if a_orig[idim] > boxsize/2:
-            offset_a[idim] = -boxsize
-            offset_b[idim] = boxsize
+            offset_a = -boxsize
+            offset_b = boxsize
         else:
-            offset_a[idim] = boxsize
-            offset_b[idim] = -boxsize
+            offset_a = boxsize
+            offset_b = -boxsize
         ts.set_time("Define offsets")
             
         # Step 2: Mirror A & B point(s)
         a_mirror = np.copy(a_list)
         b_mirror = np.copy(b_list)
-        for ii in range(len(a_list)):
-            a_mirror[ii] += offset_a
-            b_mirror[ii] += offset_b
+        a_mirror[:, idim] += offset_a
+        b_mirror[:, idim] += offset_b
         ts.set_time("Mirror")
-            
+        set_trace()
+
         # Step 3: Add mirrored points back to original list in right order
         a_list = np.concatenate((a_mirror, a_list))
-        b_list = np.concatenate((b_list, np.flip(b_mirror, axis=0)))
+        b_list = np.concatenate((b_list, b_mirror))#np.flip(b_mirror, axis=0)))
         ts.set_time("Update A/B lists")
-        #ts.print_time_usage("_split_points")
         
         return a_list, b_list
+
 
     def _find_cylinder_member_points(
         self, p1, p2, coords, distance, use_tree=False):
@@ -1862,29 +1872,41 @@ class Skeleton:
         self, p1, p2, coords, distance, ifil=None, tree_points=None,
         flag=None, min_dist=None, ind_fil=None):
 
+        boxsize = self.bbox[0, 1] - self.bbox[0, 0]
+
         ts = TimeStamp()
         
-        # Empty return value
+        # Empty return value. Ngb indices, distances
         empty = [np.zeros(0, dtype=int), np.zeros(0)]
 
+        # Vector from P1 to P2, its midpoint, and length
         pvec = p2 - p1
+        if np.max(np.abs(pvec)) > boxsize/2: set_trace()
         pmid = (p1 + p2) / 2
         dp = np.linalg.norm(pvec)
         ts.set_time("Setup")
+
+        # Find all points that *might* be in the cylinder
+        max_radius = np.sqrt((dp/2)**2 + distance**2)
         if tree_points is None:
             tree_points = cKDTree(coords)
-        ind_candidate = tree_points.query_ball_point(
-            pmid, np.sqrt((dp/2)**2 + distance**2))
+        ind_candidate = tree_points.query_ball_point(pmid, max_radius)
         ts.set_time("Tree query")
         
         # No need to continue if there are no neighbours
         if len(ind_candidate) == 0: return empty
-            
+
         # Check those points in the sphere against the actual cylinder.
-        #ind_candidate = np.array(ind_candidate, copy=False)
-        ts.set_time("Arrayise ngbs")
-        
         q = coords[ind_candidate, :]
+
+        # Some neighbours may be wrapped and so we need to use their mirror
+        # points instead!
+        dq = q - pmid
+        ind_flip_up = np.nonzero(dq < -boxsize/2)
+        ind_flip_down = np.nonzero(dq > boxsize/2)
+        q[ind_flip_up[0], ind_flip_up[1]] += boxsize
+        q[ind_flip_down[0], ind_flip_down[1]] -= boxsize
+
         ts.set_time(f"Extract {q.shape[0]} candidate coords")
 
         alpha_1 = np.dot(q - p1, pvec)
@@ -1971,7 +1993,7 @@ class Skeleton:
                 offset = self.filament_data['SamplingPointsOffset'][ifil]
                 end = self.filament_data['SamplingPointsEnd'][ifil]
             
-            l_seg_filament = l_seg[offset:end-1]            
+            l_seg_filament = l_seg[offset:end-1]
             if exclude_masked:
                 if use_simple:
                     mask_bits = (
